@@ -241,6 +241,8 @@ int main(int argc, const char** argv)
 	int count_done = 0;
 	int count_skipped = 0;
 
+	unsigned char buf[65536];
+
 	while (fz_optind < argc)
 	{
 		const char *filepath = argv[fz_optind++];
@@ -270,13 +272,13 @@ int main(int argc, const char** argv)
 
 		if (split)
 		{
-			static fz_stream* datafeed = NULL;
+			fz_stream* datafeed = NULL;
 			char *seg_filepath = NULL;
 			fz_output *dest_file = NULL;
 
 			fz_try(ctx)
 			{
-				struct stat st ={0};
+				struct stat st = {0};
 				if (stat(filepath, &st))
 				{
 					int err = errno;
@@ -292,7 +294,8 @@ int main(int argc, const char** argv)
 
 					count_done++;
 					count_skipped++;
-				} else
+				}
+				else
 				{
 					datafeed = fz_open_file(ctx, filepath);
 					if (datafeed == NULL)
@@ -308,7 +311,6 @@ int main(int argc, const char** argv)
 					blake3_hasher_init(&hasher);
 
 					// Read input bytes from file.
-					unsigned char buf[65536];
 					size_t n = fz_read(ctx, datafeed, buf, sizeof(buf));
 					while (n > 0)
 					{
@@ -325,16 +327,18 @@ int main(int argc, const char** argv)
 					// prep a header block:
 					int segment_index = 0;
 
+					info_header_t seg_hdr =
+					{
+						1,		// version
+						0,
+						filesize,
+					};
+					memcpy(seg_hdr.hashbytes, hash, BLAKE3_OUT_LEN);
+
 					int64_t copy_len = filesize;
 					while (copy_len > 0)
 					{
-						info_header_t seg_hdr =
-						{
-							1,		// version
-							segment_index + 1,   // segment number in the file header is 1-based on purpose!
-							filesize,
-						};
-						memcpy(seg_hdr.hashbytes, hash, BLAKE3_OUT_LEN);
+						seg_hdr.segment_number = segment_index + 1;   // segment number in the file header is 1-based on purpose!
 
 						// construct filename for each segment file:
 						seg_filepath = fz_asprintf(ctx, "%s.seg%04d", filepath, segment_index);
@@ -389,6 +393,8 @@ int main(int argc, const char** argv)
 					// all done: close source file
 					fz_drop_stream(ctx, datafeed);
 					datafeed = NULL;
+
+					fz_info(ctx, "OK split: %q @ %zu bytes --> %d segment files.\n", filepath, (size_t)filesize, segment_index);
 				}
 			}
 			fz_catch(ctx)
@@ -411,7 +417,176 @@ int main(int argc, const char** argv)
 		else
 		{
 			// MERGE
+			fz_stream* datafeed = NULL;
+			char *seg_filepath = NULL;
+			char *dest_filepath = NULL;
+			fz_output *dest_file = NULL;
+			int segment_index = 0;
+			info_header_t seg_hdr = {0};
+			uint64_t dest_filesize = 0;
 
+			fz_try(ctx)
+			{
+				// construct the filename for the initial segment file:
+				// (allocate spare space for what we're about to do next; assume we'll never have more than a billion segment files ;-) )
+				seg_filepath = fz_asprintf(ctx, "%sXSEG0000000000", filepath);
+				if (!seg_filepath)
+				{
+					fz_throw(ctx, FZ_ERROR_ABORT, "Out of memory while setting up merge action for segment file %q\n", filepath);
+				}
+
+				const char *fext = fz_name_extension(seg_filepath);
+
+				do
+				{
+					// since the space of the filepath is allocated and of sufficient size, we can simply plug in the correct extension:
+					fz_snprintf((char *)fext, 10, ".seg%04d", segment_index);
+
+					// open the little bugger and loaad the header for inspection:
+					datafeed = fz_open_file(ctx, seg_filepath);
+					if (datafeed == NULL)
+					{
+						int err = errno;
+						fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot open segment file %q: error %d (%s)\n", seg_filepath, err, strerror(err));
+					}
+
+					size_t n;
+
+#if !defined(L_LITTLE_ENDIAN)
+					fz_read_int32_le(ctx, dest_file, 1);
+					fz_read_int32_le(ctx, dest_file, segment_index);
+					fz_read_int64_le(ctx, dest_file, filesize);
+					fz_read_data(ctx, dest_file, hash, BLAKE3_OUT_LEN);
+					uint8_t reserved_nuls[256 - 32 - 16] ={0};
+					n = fz_read(ctx, dest_file, reserved_nuls, sizeof(reserved_nuls));
+#else
+					n = fz_read(ctx, datafeed, (uint8_t *)&seg_hdr, sizeof(seg_hdr));
+#endif
+					if (n != sizeof(info_header_t))
+					{
+						fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot read segment file %q: not enough data: invalid info header.\n", seg_filepath);
+					}
+
+					// check the header:
+					if (seg_hdr.format_version != 1)
+					{
+						fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot process segment file %q: unsupported format: unknown version reported in the header.\n", seg_filepath);
+					}
+					if (seg_hdr.segment_number != segment_index + 1)
+					{
+						fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to process segment file %q: unexpected segment number %d does not match our expectations (~ segment number %d)\n", seg_filepath, (int)seg_hdr.segment_number, segment_index + 1);
+					}
+
+					// only create the destination file the first time we go through this loop:
+					if (segment_index == 0)
+					{
+						// now go create the target file:
+						dest_filepath = fz_strdup(ctx, filepath);
+						if (!dest_filepath)
+						{
+							fz_throw(ctx, FZ_ERROR_ABORT, "Out of memory while setting up merge action for segment file %q\n", filepath);
+						}
+
+						const char *dest_fext = fz_name_extension(dest_filepath);
+						*((char *)dest_fext) = 0;
+
+						dest_file = fz_new_output_with_path(ctx, dest_filepath, FALSE);
+						if (dest_file == NULL)
+						{
+							int err = errno;
+							fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot open destination file %q: error %d (%s)\n", dest_filepath, err, strerror(err));
+						}
+					}
+
+					// now write the segment's data:
+					size_t seg_copy_size = 0;
+					size_t read_size = sizeof(buf);
+					n = fz_read(ctx, datafeed, buf, read_size);
+					while (n > 0)
+					{
+						fz_write_data(ctx, dest_file, buf, n);
+						seg_copy_size += n;
+						n = fz_read(ctx, datafeed, buf, read_size);
+					}
+
+					// has the entire designated segment been copied?
+					if (n != 0)
+					{
+						fz_throw(ctx, FZ_ERROR_ABORT, "Failed to complete reading segment file %q; aborting!\n", seg_filepath);
+					}
+
+					fz_drop_stream(ctx, datafeed);
+					datafeed = NULL;
+
+					segment_index++;
+
+					// now see if there should be another segment file ready for us:
+					dest_filesize += seg_copy_size;
+
+				} while (dest_filesize < seg_hdr.filesize);
+
+				if (dest_filesize != seg_hdr.filesize)
+				{
+					fz_throw(ctx, FZ_ERROR_ABORT, "Failed to reconstruct the source file %q from the segments: file size does not match the expectation!\n", dest_filepath);
+				}
+
+				// now check the destination file by calculating its fingerprint/checksum:
+				fz_close_output(ctx, dest_file);
+				fz_drop_output(ctx, dest_file);
+				dest_file = NULL;
+
+				datafeed = fz_open_file(ctx, dest_filepath);
+				if (datafeed == NULL)
+				{
+					int err = errno;
+					fz_throw(ctx, FZ_ERROR_GENERIC, "Cannot open target file %q: error %d (%s)\n", dest_filepath, err, strerror(err));
+				}
+
+				// calculate the hash/fingerprint of the target file:
+
+				// Initialize the hasher.
+				blake3_hasher hasher;
+				blake3_hasher_init(&hasher);
+
+				// Read input bytes from file.
+				size_t n = fz_read(ctx, datafeed, buf, sizeof(buf));
+				while (n > 0)
+				{
+					blake3_hasher_update(&hasher, buf, n);
+					n = fz_read(ctx, datafeed, buf, sizeof(buf));
+				}
+
+				// Finalize the hash. BLAKE3_OUT_LEN is the default output length, 32 bytes.
+				uint8_t hash[BLAKE3_OUT_LEN];
+				blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
+
+				fz_drop_stream(ctx, datafeed);
+				datafeed = NULL;
+
+				// compare the fingerprint:
+				if (0 != memcmp(seg_hdr.hashbytes, hash, sizeof(hash)))
+				{
+					fz_throw(ctx, FZ_ERROR_ABORT, "Failed to reconstruct the source file %q from the segments: file hash/fingerprint does not match the expectation!\n", dest_filepath);
+				}
+
+				fz_info(ctx, "OK merge/reconstruct: %q @ %zu bytes <-- %d segment files.\n", dest_filepath, (size_t)seg_hdr.filesize, segment_index);
+			}
+			fz_catch(ctx)
+			{
+				if (datafeed)
+				{
+					fz_drop_stream(ctx, datafeed);
+					datafeed = NULL;
+				}
+
+				if (dest_file)
+				{
+					fz_drop_output(ctx, dest_file);
+					dest_file = NULL;
+				}
+
+				fz_error(ctx, "Failure while processing %q et al: %s", filepath, fz_caught_message(ctx));
+			}
 		}
 
 		fz_flush_warnings(ctx);
