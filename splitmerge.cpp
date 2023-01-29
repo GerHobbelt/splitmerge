@@ -17,6 +17,11 @@
 #include <windows.h>
 #endif
 
+#include <string>
+#include <vector>
+
+using namespace std;
+
 #undef MIN
 #define MIN(a, b)  ((a) <= (b) ? (a) : (b))
 
@@ -275,6 +280,7 @@ int main(int argc, const char** argv)
 			fz_stream* datafeed = NULL;
 			char *seg_filepath = NULL;
 			fz_output *dest_file = NULL;
+			vector<string> produced_output_files;
 
 			fz_try(ctx)
 			{
@@ -347,6 +353,8 @@ int main(int argc, const char** argv)
 							fz_throw(ctx, FZ_ERROR_ABORT, "Out of memory while setting up segment file(s) for source file %q\n", filepath);
 						}
 
+						produced_output_files.push_back(seg_filepath);
+
 						dest_file = fz_new_output_with_path(ctx, seg_filepath, FALSE);
 
 #if !defined(L_LITTLE_ENDIAN)
@@ -395,6 +403,19 @@ int main(int argc, const char** argv)
 					datafeed = NULL;
 
 					fz_info(ctx, "OK split: %q @ %zu bytes --> %d segment files.\n", filepath, (size_t)filesize, segment_index);
+
+					// house-cleaning?
+					if (!keep)
+					{
+						// delete source file
+						if (fz_remove_utf8(ctx, filepath))
+						{
+							fz_error(ctx, "Error reported while attempting to delete the source file %q: %s\n", filepath, fz_ctx_pop_system_errormsg(ctx));
+							// do not throw an error, as this is considered benign, as in: not suitable for full cleanup, which would nuke all generated segment files (*!OOPS!* when the delete of the sourcefile made it even 'half-way through'...  :-(  )
+						}
+
+						fz_info(ctx, "Clean-Up: source file has been deleted.\n");
+					}
 				}
 			}
 			fz_catch(ctx)
@@ -412,6 +433,15 @@ int main(int argc, const char** argv)
 				}
 
 				fz_error(ctx, "Failure while splitting %q: %s", filepath, fz_caught_message(ctx));
+
+				// house cleaning
+				for (auto segmentfilepath : produced_output_files)
+				{
+					// delete segment file
+					(void)fz_remove_utf8(ctx, segmentfilepath.c_str());
+				}
+
+				fz_info(ctx, "Clean-Up: Generated segment files have been deleted.\n");
 			}
 		}
 		else
@@ -424,6 +454,7 @@ int main(int argc, const char** argv)
 			int segment_index = 0;
 			info_header_t seg_hdr = {0};
 			uint64_t dest_filesize = 0;
+			vector<string> processed_segment_files;
 
 			fz_try(ctx)
 			{
@@ -441,6 +472,8 @@ int main(int argc, const char** argv)
 				{
 					// since the space of the filepath is allocated and of sufficient size, we can simply plug in the correct extension:
 					fz_snprintf((char *)fext, 10, ".seg%04d", segment_index);
+
+					processed_segment_files.push_back(seg_filepath);
 
 					// open the little bugger and loaad the header for inspection:
 					datafeed = fz_open_file(ctx, seg_filepath);
@@ -570,6 +603,22 @@ int main(int argc, const char** argv)
 				}
 
 				fz_info(ctx, "OK merge/reconstruct: %q @ %zu bytes <-- %d segment files.\n", dest_filepath, (size_t)seg_hdr.filesize, segment_index);
+
+				// house cleaning?
+				if (!keep)
+				{
+					for (auto segmentfilepath : processed_segment_files)
+					{
+						// delete segment file
+						if (fz_remove_utf8(ctx, segmentfilepath.c_str()))
+						{
+							fz_error(ctx, "Error reported while attempting to delete the source segment file %q: %s\n", segmentfilepath.c_str(), fz_ctx_pop_system_errormsg(ctx));
+							// do not throw an error, as this is considered benign, as in: not suitable for full cleanup, which would nuke the generated = reconstructed original file (*!OOPS!*: dest file gone and now some or all source segments are nuked too? Very much OOPSIE!  :-(  )
+						}
+					}
+
+					fz_info(ctx, "Clean-Up: All source segment files have been deleted.\n");
+				}
 			}
 			fz_catch(ctx)
 			{
@@ -586,6 +635,11 @@ int main(int argc, const char** argv)
 				}
 
 				fz_error(ctx, "Failure while processing %q et al: %s", filepath, fz_caught_message(ctx));
+
+				// house cleaning
+				(void)fz_remove_utf8(ctx, dest_filepath);
+
+				fz_info(ctx, "Clean-Up: Destination file (damaged) has been deleted.\n");
 			}
 		}
 
