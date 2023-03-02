@@ -41,7 +41,7 @@ path & name as the original file, but '.seg0000' will be appended
 as the file extension for the first segment. Subsequent segments
 will have .seg0001, .srg0002, ... as file extension.
 
-Default baheviour of the tool is to SPLIT, UNLESS the specified
+Default behaviour of the tool is to SPLIT, UNLESS the specified
 source file has extension .seg0000, in which case the default
 action is to MERGE.
 
@@ -56,7 +56,7 @@ Options
 
 -s   Split (forced: you only need this when you want to split
      a *sourcefile* that itself has the file extension .seg0000
-     You don't neeed this command/option for any other file as
+     You don't need this command/option for any other file as
      the DEFAULT ACTION is to SPLIT.)
 
 Note: MERGE is chosen as the default action automatically when
@@ -67,13 +67,15 @@ the sourcefile specified has extension .seg0000 (or any other
      once the action has completed successfully. This applies
      to both SPLIT and MERGE: SPLIT will, by default, delete
      the source file after splitting; MERGE will delete all
-     segmeent files after the merge has completed sucessfully.
+     segment files after the merge has completed successfully.
 
 -l <size>
      Specify the segment size in bytes (default), kilobytes (k)
      or megabytes (M), e.g.: -l 42M
 
-     Default sizee is: 15M
+     Default size is: 15M
+
+-v   Print the version info of this tool.
 
 
 Segment Files
@@ -111,7 +113,7 @@ segment files to be present in the same directory as the
 initial .seg0000 file.
 After merging the segments, the reconstructed 'original'
 largeFile.bin file is hashed and compared against the
-stored hash in .seg0000: the meerge/reconstruction action
+stored hash in .seg0000: the merge/reconstruction action
 is successful when the hashes match, after which the segment
 files will be deleted.
 
@@ -188,7 +190,7 @@ int main(int argc, const char** argv)
 	int cli_count = 0;
 
 	fz_getopt_reset();
-	while ((c = fz_getopt(argc, argv, "hskl:")) != -1)
+	while ((c = fz_getopt(argc, argv, "hskl:v")) != -1)
 	{
 		cli_count++;
 		switch (c)
@@ -211,7 +213,7 @@ int main(int argc, const char** argv)
 				break;
 
 			case 'M':
-				split_size += 1024 * 1024;
+				split_size *= 1024 * 1024;
 				unit_str++;
 				break;
 
@@ -223,11 +225,20 @@ int main(int argc, const char** argv)
 				fz_error(ctx, "split-size unit MUST be B, K or M. Unsupported unit: %s\n", unit_str);
 				return EXIT_FAILURE;
 			}
+			// reject unsavory split sizes:
+			if (split_size < 10 || split_size >= INT32_MAX - 16)
+			{
+				fz_error(ctx, "split-size %zu is considered unsavory and unacceptable. Command aborted.\n", (size_t)split_size);
+				return EXIT_FAILURE;
+			}
 		}
 			break;
 
 		case 'k': keep = true; break;
 		case 's': split_forced = true; break;
+		case 'v':
+			printf("splitmerge version 1.2 (2023-03-01)\n");
+			return EXIT_SUCCESS;
 		case 'h':
 		default:
 			return usage();
@@ -303,6 +314,13 @@ int main(int argc, const char** argv)
 				}
 				else
 				{
+					// reject unsavory split sizes:
+					if (filesize / split_size > 10000)
+					{
+						fz_error(ctx, "split-size %zu is considered unsavory and unacceptable for file %s (length %llu): the file would be split into more than 10K segments! Command aborted.\n", (size_t)split_size, filepath, (long long int)filesize);
+						return EXIT_FAILURE;
+					}
+
 					datafeed = fz_open_file(ctx, filepath);
 					if (datafeed == NULL)
 					{
@@ -359,7 +377,7 @@ int main(int argc, const char** argv)
 
 #if !defined(L_LITTLE_ENDIAN)
 						fz_write_int32_le(ctx, dest_file, 1);
-						fz_write_int32_le(ctx, dest_file, segment_index);
+						fz_write_int32_le(ctx, dest_file, segment_index + 1);
 						fz_write_int64_le(ctx, dest_file, filesize);
 						fz_write_data(ctx, dest_file, hash, BLAKE3_OUT_LEN);
 						uint8_t reserved_nuls[256 - 32 - 16] ={0};
@@ -411,7 +429,7 @@ int main(int argc, const char** argv)
 						if (fz_remove_utf8(ctx, filepath))
 						{
 							fz_error(ctx, "Error reported while attempting to delete the source file %q: %s\n", filepath, fz_ctx_pop_system_errormsg(ctx));
-							// do not throw an error, as this is considered benign, as in: not suitable for full cleanup, which would nuke all generated segment files (*!OOPS!* when the delete of the sourcefile made it even 'half-way through'...  :-(  )
+							// do not throw an error, for this is considered benign, as in: not suitable for full cleanup, which would nuke all generated segment files (*!OOPS!* when the delete of the sourcefile made it even 'half-way through'...  :-(  )
 						}
 
 						fz_info(ctx, "Clean-Up: source file has been deleted.\n");
@@ -475,7 +493,7 @@ int main(int argc, const char** argv)
 
 					processed_segment_files.push_back(seg_filepath);
 
-					// open the little bugger and loaad the header for inspection:
+					// open the little bugger and load the header for inspection:
 					datafeed = fz_open_file(ctx, seg_filepath);
 					if (datafeed == NULL)
 					{
@@ -613,7 +631,7 @@ int main(int argc, const char** argv)
 						if (fz_remove_utf8(ctx, segmentfilepath.c_str()))
 						{
 							fz_error(ctx, "Error reported while attempting to delete the source segment file %q: %s\n", segmentfilepath.c_str(), fz_ctx_pop_system_errormsg(ctx));
-							// do not throw an error, as this is considered benign, as in: not suitable for full cleanup, which would nuke the generated = reconstructed original file (*!OOPS!*: dest file gone and now some or all source segments are nuked too? Very much OOPSIE!  :-(  )
+							// do not throw an error, for this is considered benign, as in: not suitable for full cleanup, which would nuke the generated = reconstructed original file (*!OOPS!*: dest file gone and now some or all source segments are nuked too? Very much OOPSIE!  :-(  )
 						}
 					}
 
