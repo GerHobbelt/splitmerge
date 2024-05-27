@@ -450,7 +450,7 @@ int main(int argc, const char** argv)
 					dest_file = NULL;
 				}
 
-				fz_error(ctx, "Failure while splitting %q: %s", filepath, fz_caught_message(ctx));
+				fz_error(ctx, "Failure while splitting %q: %s", filepath, fz_convert_error(ctx, NULL));
 
 				// house cleaning
 				for (auto segmentfilepath : produced_output_files)
@@ -652,7 +652,7 @@ int main(int argc, const char** argv)
 					dest_file = NULL;
 				}
 
-				fz_error(ctx, "Failure while processing %q et al: %s", filepath, fz_caught_message(ctx));
+				fz_error(ctx, "Failure while processing %q et al: %s", filepath, fz_convert_error(ctx, NULL));
 
 				// house cleaning
 				(void)fz_remove_utf8(ctx, dest_filepath);
